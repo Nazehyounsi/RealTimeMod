@@ -102,15 +102,13 @@ def real_time_inference_loop(model, device, processor, guide_weight=0.0):
     batch_size = 1
     z_tensor, chunk_descriptor_tensor = generate_random_tensors_numpy(batch_size)
     chunk_descriptor_tensor[:, 0] = 0.151
-
-    while True:
+    n = 0
+    while n < 100:
         start_time = time.time()
 
         chunk_descriptor_tensor[:, 0] = chunk_descriptor_tensor[:, 0] + 0.001
         chunk_descriptor_tensor[:, 1] = 0
         chunk_descriptor_tensor[:, 2] = 0
-
-
 
         try:
             input_vector = next(frame_batches)  # Get the next 8-frame batch
@@ -149,6 +147,7 @@ def real_time_inference_loop(model, device, processor, guide_weight=0.0):
         print("la outputed sequence")
         print(agent_output)
 
+        n=n+1
         elapsed_time = time.time() - start_time
         time.sleep(max(0, 0.3 - elapsed_time))
 
