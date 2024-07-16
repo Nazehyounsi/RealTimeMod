@@ -4,6 +4,7 @@ import time
 import pandas as pd
 from Model import Model_mlp_diff, Model_Cond_Diffusion, ObservationEmbedder, SpeakingTurnDescriptorEmbedder, ChunkDescriptorEmbedder
 import random
+from sklearn.neighbors import KernelDensity
 
 buffer_sequence = [0., 5., 5., 5., 6., 6., 4., 4., 4., 4., 4., 4., 0., 0., 0., 0., 0., 0.,
         0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.,
@@ -103,6 +104,7 @@ def real_time_inference_loop(model, device, processor, guide_weight=0.0):
     z_tensor, chunk_descriptor_tensor = generate_random_tensors_numpy(batch_size)
     chunk_descriptor_tensor[:, 0] = 0.151
     n = 0
+    kde_samples = 3
     while n < 100:
         start_time = time.time()
 
@@ -132,18 +134,40 @@ def real_time_inference_loop(model, device, processor, guide_weight=0.0):
         print(z_tensor)
         print("C:")
         print(chunk_descriptor_tensor)
-        with torch.no_grad():
-            model.guide_w = guide_weight
-            y_pred = model.sample(input_tensor, z_tensor, chunk_descriptor_tensor).detach().cpu().numpy()
+#KDE####################################################################
+        all_predictions = []
+        for _ in range(kde_samples):
+            with torch.no_grad():
+                model.guide_w = guide_weight
+                start_time = time.time()
+                y_pred = model.sample(input_tensor, z_tensor, chunk_descriptor_tensor).detach().cpu().numpy()
+                end_time = time.time()
+                inference_time = end_time - start_time
+                print(f"Inference time for the current batch: {inference_time: .4f} seconds")
+                all_predictions.append(y_pred)
 
-        best_prediction = np.round(y_pred)
+        # Apply KDE for the chunk and determine the best prediction
+        best_prediction = np.zeros_like(y_pred)
+        single_pred_samples = np.array(all_predictions).squeeze()
+        kde = KernelDensity(kernel='gaussian', bandwidth=0.1).fit(single_pred_samples)
+        log_density = kde.score_samples(single_pred_samples)
+        best_idx = np.argmax(log_density)
+        best_prediction = single_pred_samples[best_idx]
+
+        ####################################KDE###########"""
+        # with torch.no_grad():
+        #     model.guide_w = guide_weight
+        #     y_pred = model.sample(input_tensor, z_tensor, chunk_descriptor_tensor).detach().cpu().numpy()
+
         best_prediction[best_prediction == 4] = 3
         best_prediction[best_prediction >= 5] = 0
         best_prediction[best_prediction < 0] = 0
 
         print("la prediction entière")
         print(best_prediction)
-        agent_output = best_prediction[0, -8:]
+        agent_output = best_prediction[-8:]
+        #agent_output = best_prediction[0, -8:] #NON KDE
+
         print("la outputed sequence")
         print(agent_output)
 
