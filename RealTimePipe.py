@@ -58,7 +58,7 @@ def generate_random_tensors_numpy(batch_size=1):
     #z_tensor[:, 1] = np.random.randint(1, 5, size=batch_size)   # Second value: int from 1 to 4
     z_tensor[:,0] = 12
     z_tensor[:, 1] = 2
-    z_tensor[:, 2] = 0  # Last value always 0
+    z_tensor[:, 2] = 12  # Last value always 0
     z_tensor[:, 3] = 0  # Last value always 0
 
     # Generate random chunk_descriptor_tensor
@@ -101,6 +101,7 @@ def real_time_inference_loop(model, device, processor, guide_weight=0.0):
     frame_batches = send_frames_in_batches(random_sequence)
     batch_size = 1
     z_tensor, chunk_descriptor_tensor = generate_random_tensors_numpy(batch_size)
+    chunk_descriptor_tensor[:, 0] = 0.151
 
     while True:
         start_time = time.time()
