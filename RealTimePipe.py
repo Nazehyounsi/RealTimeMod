@@ -111,6 +111,7 @@ def real_time_inference_loop(model, device, processor, guide_weight=0.0):
         chunk_descriptor_tensor[:, 2] = 0
 
 
+
         try:
             input_vector = next(frame_batches)  # Get the next 8-frame batch
             while len(input_vector) < 8 :
@@ -125,6 +126,8 @@ def real_time_inference_loop(model, device, processor, guide_weight=0.0):
 
         updated_buffer = preprocess_real_time(input_vector, processor)
         input_tensor = torch.tensor(updated_buffer, dtype=torch.float32).unsqueeze(0).to(device)
+        z_tensor = z_tensor.to(device)
+        chunk_descriptor_tensor = chunk_descriptor_tensor.to(device)
         print("la client sequence entière")
         print(input_tensor)
         print("Z:")
