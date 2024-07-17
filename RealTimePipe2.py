@@ -62,7 +62,7 @@ class RealTimeProcessor:
         reprojected = [0] * buffer_size
 
         # Calculate the reprojection ratio
-        ratio = target_length / buffer_size
+        ratio = round(target_length / buffer_size)
 
         # Initialize the position in the projected array
         pos = 0.0
@@ -83,6 +83,8 @@ class RealTimeProcessor:
                 reprojected[i] = round(value_sum / value_count)
             else:
                 reprojected[i] = 0
+            if next_pos > target_length:
+                reprojected[i] = reprojected[i-1]
 
         return reprojected
 
