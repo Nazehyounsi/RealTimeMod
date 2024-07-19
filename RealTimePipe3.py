@@ -22,6 +22,59 @@ sequence_length = 137
 x_dim = 137
 y_dim = 137
 
+def calculate_metrics(y_pred_list, y_target_list):
+    correct_activations = 0
+    correct_classless_activations = 0
+    correct_activations_for_class_1 = 0
+    correct_activations_for_class_2 = 0
+    correct_activations_for_class_3 = 0
+    total_activations_ground_truth = 0
+    total_activations_ground_truth_1 = 0
+    total_activations_ground_truth_2 = 0
+    total_activations_ground_truth_3 = 0
+    correct_non_activations = 0
+    total_non_activations_ground_truth = 0
+
+    for pred, target in zip(y_pred_list, y_target_list):
+        pred_array = np.array(pred)
+        target_array = np.array(target)
+
+        is_active_pred = pred_array > 0
+        is_active_target = target_array > 0
+        is_active_1 = target_array == 1
+        is_active_2 = target_array == 2
+        is_active_3 = target_array == 3
+
+        correct_activations += np.sum((pred_array == target_array) & is_active_target)
+        correct_classless_activations += np.sum(is_active_pred & is_active_target)
+        correct_activations_for_class_1 += np.sum((pred_array == target_array) & is_active_1)
+        correct_activations_for_class_2 += np.sum((pred_array == target_array) & is_active_2)
+        correct_activations_for_class_3 += np.sum((pred_array == target_array) & is_active_3)
+
+        total_activations_ground_truth += np.sum(is_active_target)
+        total_activations_ground_truth_1 += np.sum(is_active_1)
+        total_activations_ground_truth_2 += np.sum(is_active_2)
+        total_activations_ground_truth_3 += np.sum(is_active_3)
+
+        correct_non_activations += np.sum((pred_array == target_array) & ~is_active_target)
+        total_non_activations_ground_truth += np.sum(~is_active_target)
+
+    ahr_mouthup = correct_activations_for_class_1 / total_activations_ground_truth_1 if total_activations_ground_truth_1 > 0 else 0
+    ahr_nosewrinkle = correct_activations_for_class_2 / total_activations_ground_truth_2 if total_activations_ground_truth_2 > 0 else 0
+    ahr_mouthdown = correct_activations_for_class_3 / total_activations_ground_truth_3 if total_activations_ground_truth_3 > 0 else 0
+    ahr = correct_activations / total_activations_ground_truth if total_activations_ground_truth > 0 else 0
+    achr = correct_classless_activations / total_activations_ground_truth if total_activations_ground_truth > 0 else 0
+    nhr = correct_non_activations / total_non_activations_ground_truth if total_non_activations_ground_truth > 0 else 0
+
+    return {
+        "ahr_mouthup": ahr_mouthup,
+        "ahr_nosewrinkle": ahr_nosewrinkle,
+        "ahr_mouthdown": ahr_mouthdown,
+        "ahr": ahr,
+        "achr": achr,
+        "nhr": nhr
+    }
+
 def is_valid_chunk(chunk):
     if not chunk[0]:  # Check if the chunk[0] is an empty list
         return False
@@ -196,10 +249,10 @@ class RealTimeProcessor:
         self.buffer = [0] * buffer_size
 
     def update_buffer(self, new_data):
-        if len(new_data) != 16:
+        if len(new_data) != 17:
             raise ValueError("New data must be exactly 16 frames long.")
-        self.buffer = self.buffer[len(new_data):] + new_data
-
+        #self.buffer = self.buffer[len(new_data):] + new_data
+        self.buffer = new_data
     def project_to_target(self):
         buffer_length = len(self.buffer)
         projected = [0] * self.target_size
@@ -262,7 +315,7 @@ def preprocess_real_time(input_frames, processor):
 
 
 
-def send_frames_in_batches(sequence, batch_size=16):
+def send_frames_in_batches(sequence, batch_size=17):
     for i in range(0, len(sequence), batch_size):
         yield sequence[i:i + batch_size]
 
@@ -293,6 +346,8 @@ def real_time_inference_loop(model, device, processor, all_chunks, guide_weight=
     model.eval()
     batch_size = 1
     chunk_index = 0
+    y_pred_list = []
+    y_target_list = []
 
     while chunk_index < len(all_chunks):
         x_tensor, y_tensor, z_tensor, chunk_descriptor_tensor, speaking_turn_duration_tensor = all_chunks[chunk_index]
@@ -312,14 +367,14 @@ def real_time_inference_loop(model, device, processor, all_chunks, guide_weight=
                 start_time = time.time()
                 target_vector = next(target_batches)
                 input_vector = next(frame_batches)
-                while len(input_vector) < 16:
+                while len(input_vector) < 17:
                     input_vector.append(0)
-                while len(target_vector) < 16:
+                while len(target_vector) < 17:
                     target_vector.append(0)
 
-                print("the client 16 frames tel quel")
+                print("the client 17 frames tel quel")
                 print(input_vector)
-                print("the therapist  16 target frames")
+                print("the therapist  17 target frames")
                 print(target_vector)
 
                 updated_buffer = preprocess_real_time(input_vector, processor)
@@ -332,7 +387,11 @@ def real_time_inference_loop(model, device, processor, all_chunks, guide_weight=
 
                 with torch.no_grad():
                     model.guide_w = guide_weight
+                    start_time2 = time.time()
                     y_pred = model.sample(input_tensor, z_tensor, chunk_descriptor_tensor).detach().cpu().numpy()
+                    end_time2 = time.time()
+                    inference_time = end_time2 - start_time2
+                    print(f"Inference time for the current batch: {inference_time: .4f} seconds")
 
                 best_prediction = np.round(y_pred)
                 best_prediction[best_prediction == 4] = 3
@@ -344,11 +403,18 @@ def real_time_inference_loop(model, device, processor, all_chunks, guide_weight=
                 print("Reprojected Output prediction :")
                 print(reprojected_output)
 
+                y_pred_list.append(reprojected_output)
+                y_target_list.append(target_vector)
+
                 elapsed_time = time.time() - start_time
+                print(f"Inference time for the current loop: {inference_time: .4f} seconds")
                 time.sleep(max(0, 0.3 - elapsed_time))
 
         except StopIteration:
             chunk_index += 1
+
+    metrics = calculate_metrics(y_pred_list, y_target_list)
+    print("Metrics:", metrics)
 
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
