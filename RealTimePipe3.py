@@ -241,7 +241,7 @@ def preprocess_data(data):
         processed_chunk.append((chunk, speaking_turn_duration))
     return processed_chunk, sequence_length
 class RealTimeProcessor:
-    def __init__(self, buffer_size=17, target_size=137):
+    def __init__(self, buffer_size=68, target_size=137):
         self.buffer_size = buffer_size
         self.target_size = target_size
         #self.buffer = np.zeros((buffer_size,))
@@ -249,7 +249,7 @@ class RealTimeProcessor:
         self.buffer = [0] * buffer_size
 
     def update_buffer(self, new_data):
-        if len(new_data) != 17:
+        if len(new_data) != 68:
             raise ValueError("New data must be exactly 16 frames long.")
         #self.buffer = self.buffer[len(new_data):] + new_data
         self.buffer = new_data
@@ -315,7 +315,7 @@ def preprocess_real_time(input_frames, processor):
 
 
 
-def send_frames_in_batches(sequence, batch_size=17):
+def send_frames_in_batches(sequence, batch_size=68):
     for i in range(0, len(sequence), batch_size):
         yield sequence[i:i + batch_size]
 
@@ -367,9 +367,9 @@ def real_time_inference_loop(model, device, processor, all_chunks, guide_weight=
                 start_time = time.time()
                 target_vector = next(target_batches)
                 input_vector = next(frame_batches)
-                while len(input_vector) < 17:
+                while len(input_vector) < 68:
                     input_vector.append(0)
-                while len(target_vector) < 17:
+                while len(target_vector) < 68:
                     target_vector.append(0)
 
                 print("the client 17 frames tel quel")
@@ -398,7 +398,7 @@ def real_time_inference_loop(model, device, processor, all_chunks, guide_weight=
                 best_prediction[best_prediction >= 5] = 0
                 best_prediction[best_prediction < 0] = 0
 
-                reprojected_output = processor.reproject_to_buffer(best_prediction[0], 17)
+                reprojected_output = processor.reproject_to_buffer(best_prediction[0], 68)
 
                 print("Reprojected Output prediction :")
                 print(reprojected_output)
