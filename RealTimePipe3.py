@@ -240,8 +240,13 @@ def preprocess_data(data):
 
         processed_chunk.append((chunk, speaking_turn_duration))
     return processed_chunk, sequence_length
+
+
+#TENTER AVEC BUFFER SIZE = 137 et le send frame rate a 137, et skip la conversion de x et y
+#  UTILISER LE CODE SERVER ET OPENFACE FRAME ET LA FONCTION SENDPOSITIVITY QUI RECUPERE LES AU VIA OPENFACE, et LA MODIFIER POUR CREER  UN SENDER VERS CE CODE PYTHON
+#CREER UN CODE EN S'INSPIRANT DE ASAP POUR RECEVOIR LES AU ENVOYER PAR CE CODE PYTHON (qui seront tranformé au format approprié)
 class RealTimeProcessor:
-    def __init__(self, buffer_size=68, target_size=137):
+    def __init__(self, buffer_size=137, target_size=137):
         self.buffer_size = buffer_size
         self.target_size = target_size
         #self.buffer = np.zeros((buffer_size,))
@@ -249,7 +254,7 @@ class RealTimeProcessor:
         self.buffer = [0] * buffer_size
 
     def update_buffer(self, new_data):
-        if len(new_data) != 68:
+        if len(new_data) != 137:
             raise ValueError("New data must be exactly 16 frames long.")
         #self.buffer = self.buffer[len(new_data):] + new_data
         self.buffer = new_data
@@ -352,66 +357,70 @@ def real_time_inference_loop(model, device, processor, all_chunks, guide_weight=
     while chunk_index < len(all_chunks):
         x_tensor, y_tensor, z_tensor, chunk_descriptor_tensor, speaking_turn_duration_tensor = all_chunks[chunk_index]
 
-        speaking_turn_duration = speaking_turn_duration_tensor.item()
-        x_sequence = convert_x_tensor(x_tensor, speaking_turn_duration)
-        y_sequence = convert_x_tensor(y_tensor, speaking_turn_duration)
+        #speaking_turn_duration = speaking_turn_duration_tensor.item()
+        #x_sequence = convert_x_tensor(x_tensor, speaking_turn_duration)
+        #y_sequence = convert_x_tensor(y_tensor, speaking_turn_duration)
 
         # Create a generator for 8-frame batches
-        frame_batches = send_frames_in_batches(x_sequence)
-        target_batches =send_frames_in_batches(y_sequence)
+        #frame_batches = send_frames_in_batches(x_sequence)
+        #target_batches =send_frames_in_batches(y_sequence)
         z_tensor = z_tensor.to(device)
         chunk_descriptor_tensor = chunk_descriptor_tensor.to(device)
 
-        try:
-            while True:
-                start_time = time.time()
-                target_vector = next(target_batches)
-                input_vector = next(frame_batches)
-                while len(input_vector) < 68:
-                    input_vector.append(0)
-                while len(target_vector) < 68:
-                    target_vector.append(0)
+        #try:
+            #while True:
+        start_time = time.time()
+        target_vector = y_tensor
+        input_vector = x_tensor
+        #target_vector = next(target_batches)
+        #input_vector = next(frame_batches)
+        # while len(input_vector) < 68:
+        #     input_vector.append(0)
+        # while len(target_vector) < 68:
+        #     target_vector.append(0)
 
-                print("the client 17 frames tel quel")
-                print(input_vector)
-                print("the therapist  17 target frames")
-                print(target_vector)
+        print("the client 17 frames tel quel")
+        print(input_vector)
+        print("the therapist  17 target frames")
+        print(target_vector)
 
-                updated_buffer = preprocess_real_time(input_vector, processor)
-                input_tensor = torch.tensor(updated_buffer, dtype=torch.float32).unsqueeze(0).to(device)
+        #updated_buffer = preprocess_real_time(input_vector, processor)
+        #input_tensor = torch.tensor(updated_buffer, dtype=torch.float32).unsqueeze(0).to(device)
 
-                print("Z:")
-                print(z_tensor)
-                print("C:")
-                print(chunk_descriptor_tensor)
+        input_tensor = input_vector
 
-                with torch.no_grad():
-                    model.guide_w = guide_weight
-                    start_time2 = time.time()
-                    y_pred = model.sample(input_tensor, z_tensor, chunk_descriptor_tensor).detach().cpu().numpy()
-                    end_time2 = time.time()
-                    inference_time = end_time2 - start_time2
-                    print(f"Inference time for the current batch: {inference_time: .4f} seconds")
+        print("Z:")
+        print(z_tensor)
+        print("C:")
+        print(chunk_descriptor_tensor)
 
-                best_prediction = np.round(y_pred)
-                best_prediction[best_prediction == 4] = 3
-                best_prediction[best_prediction >= 5] = 0
-                best_prediction[best_prediction < 0] = 0
+        with torch.no_grad():
+            model.guide_w = guide_weight
+            start_time2 = time.time()
+            y_pred = model.sample(input_tensor, z_tensor, chunk_descriptor_tensor).detach().cpu().numpy()
+            end_time2 = time.time()
+            inference_time = end_time2 - start_time2
+            print(f"Inference time for the current batch: {inference_time: .4f} seconds")
 
-                reprojected_output = processor.reproject_to_buffer(best_prediction[0], 68)
+        best_prediction = np.round(y_pred)
+        best_prediction[best_prediction == 4] = 3
+        best_prediction[best_prediction >= 5] = 0
+        best_prediction[best_prediction < 0] = 0
 
-                print("Reprojected Output prediction :")
-                print(reprojected_output)
+        #reprojected_output = processor.reproject_to_buffer(best_prediction[0], 68)
+        reprojected_output = best_prediction[0]
+        print("Reprojected Output prediction :")
+        print(reprojected_output)
 
-                y_pred_list.append(reprojected_output)
-                y_target_list.append(target_vector)
+        y_pred_list.append(reprojected_output)
+        y_target_list.append(target_vector)
 
-                elapsed_time = time.time() - start_time
-                print(f"Inference time for the current loop: {inference_time: .4f} seconds")
-                time.sleep(max(0, 0.3 - elapsed_time))
+        elapsed_time = time.time() - start_time
+        print(f"Inference time for the current loop: {inference_time: .4f} seconds")
+        time.sleep(max(0, 0.3 - elapsed_time))
 
-        except StopIteration:
-            chunk_index += 1
+        #except StopIteration:
+        chunk_index += 1
 
     metrics = calculate_metrics(y_pred_list, y_target_list)
     print("Metrics:", metrics)
