@@ -27,73 +27,100 @@ x_dim = 137
 y_dim = 137
 
 
-def extend_non_zero_sequences(input_file, output_file, column_names, extend_by=2):
-    # Load the CSV file
-    df = pd.read_csv(input_file)
 
-    for column_name in column_names:
-        # Ensure the column for operation exists
-        if column_name not in df.columns:
-            raise ValueError(f"Column '{column_name}' not found in the CSV file.")
+class Miror:
+    def __init__(self, consecutive_zero_threshold=4):
+        self.stored_sequences = []
+        self.consecutive_zero_threshold = consecutive_zero_threshold
+        self.mirroring = False
+        self.conversion_dict = {4: 1, 5: 2, 6: 3, 0: 0}  # Conversion mapping
 
-        # Apply gap filling
-        df[column_name] = fill_gaps(df[column_name], 10)
-        # Working with the specified column
-        series = df[column_name]
+    def store_sequence(self, sequence):
+        """Stores a reprojected sequence and checks for four consecutive zero sequences."""
+        self.stored_sequences.append(sequence)
+
+        # Keep only the last 4 sequences
+        if len(self.stored_sequences) > self.consecutive_zero_threshold:
+            self.stored_sequences.pop(0)
+
+        # Check if the last 4 sequences are fully zero
+        if all(np.all(seq == 0) for seq in self.stored_sequences):
+            self.mirroring = True  # Activate mirroring mode
+        else:
+            self.mirroring = False  # Deactivate mirroring mode
+
+    def mirror_sequence(self, input_tensor):
+        """Converts the input tensor to the mirrored output format using the conversion dictionary."""
+        input_values = input_tensor.cpu().numpy().squeeze()  # Convert tensor to numpy array
+        mirrored_output = np.vectorize(self.conversion_dict.get)(input_values)  # Apply conversion
+        return mirrored_output.tolist()
+
+    def should_mirror(self):
+        """Returns True if we should apply mirroring, otherwise False."""
+        return self.mirroring
 
 
-        # Create a copy to manipulate and later replace in the df
-        modified_series = series.copy()
+def identify_activation_indices(values, N):
+    """
+    Identify the indices of rising and falling edges in the sequence of values.
+    This function returns two lists:
+    1. rising_indices: Indices where the value changes from 0 to a non-zero value.
+    2. falling_indices: Indices where the value changes from a non-zero value to 0.
 
-        # Identify indices where series is non-zero
-        non_zero_indices = series[series != 0].index
+    :param values: The array of values (AU activation values).
+    :param N: The number of frames for interpolation (for reference).
+    :return: A list of rising_indices and falling_indices.
+    """
+    rising_indices = []
+    falling_indices = []
 
-        # Group consecutive indices
-        groups = []
-        group = []
-        for idx in non_zero_indices:
-            if not group or idx == group[-1] + 1:
-                group.append(idx)
-            else:
-                groups.append(group)
-                group = [idx]
-        if group:
-            groups.append(group)
+    length = len(values)
 
-        # Extend the non-zero sequences and interpolate
-        for group in groups:
-            start_idx, end_idx = group[0], group[-1]
-            extend_start = max(0, start_idx - extend_by)
-            extend_end = min(len(series), end_idx + extend_by + 1)
+    for i in range(1, length):
+        # Rising edge: from 0 to non-zero
+        if values[i] > 0 and values[i - 1] == 0:
+            rising_indices.append(i)
 
-            # Interpolate upwards to the first non-zero
-            if extend_start < start_idx:
-                start_value = 0
-                end_value = series.iloc[start_idx]
-                modified_series[extend_start:start_idx] = np.linspace(start_value, end_value, start_idx - extend_start)
+        # Falling edge: from non-zero to 0
+        if values[i] == 0 and values[i - 1] > 0:
+            falling_indices.append(i)
 
-            # Interpolate downwards from the last non-zero
-            if end_idx + 1 < extend_end:
-                start_value = series.iloc[end_idx]
-                end_value = 0
-                modified_series[end_idx + 1:extend_end] = np.linspace(start_value, end_value,
-                                                                      extend_end - (end_idx + 1))
+    return rising_indices, falling_indices
 
-        # Replace the modified column in the DataFrame
-        df[column_name] = modified_series
 
-    # Save the modified DataFrame back to a CSV file
-    df.to_csv(output_file, index=False)
+def interpolate_activations(df, columns, N):
+    """
+    Interpolates N frames before and after an activation for the specified columns.
+    Interpolates only over the registered indices to avoid overlapping interpolations.
 
-def fill_gaps(series, gap_length):
-    # Iterate through the series with a buffer of gap_length on each side
-    for i in range(gap_length, len(series) - gap_length):
-        # Check for zeros and non-zero surroundings within gap_length
-        if series[i] == 0:
-            for gap in range(1, gap_length + 1):
-                if series[i - gap] > 0 and series[i + gap] > 0:
-                    series[i] = (series[i - gap] + series[i + gap]) / 2
-                    break  # Exit the loop once a gap has been filled
+    :param df: DataFrame with activation data.
+    :param columns: List of columns to perform interpolation on.
+    :param N: Number of frames for interpolation.
+    :return: DataFrame with interpolated values.
+    """
+    for col in columns:
+        values = df[col].values  # Extract the column's values as a numpy array
+
+        # Step 1: Identify rising and falling edges
+        rising_indices, falling_indices = identify_activation_indices(values, N)
+
+        # Step 2: Perform interpolation only on registered indices
+        for idx in rising_indices:
+            start_idx = max(0, idx - N)
+            for j in range(start_idx, idx):
+                step = (values[idx] - values[start_idx]) / (idx - start_idx)
+                values[j] = round(values[start_idx] + (j - start_idx) * step, 3)
+
+        for idx in falling_indices:
+            end_idx = min(len(values), idx + N)
+            for j in range(idx, end_idx):
+                step = values[idx - 1] / (end_idx - idx)
+                values[j] = round(values[idx - 1] - (j - idx) * step, 3)
+
+        df[col] = values  # Update the DataFrame column with the interpolated values
+
+    return df
+
 
 def append_sequence_to_csv(sequence, output_csv_path, frame_rate=25):
     duration_per_frame = 1.0 / frame_rate
@@ -138,15 +165,18 @@ def restructure_to_baseline(transformed_csv_path, baseline_csv_path, output_csv_
 def coactivate_aus(input_csv_path, output_csv_path):
     df = pd.read_csv(input_csv_path)
 
-    df['AU06_r'] = df['AU12_r'] * 0.5
-    df['AU25_r'] = df['AU12_r'] * 0.25
-    df['AU10_r'] = df['AU09_r'] * 5
-    df['AU09_r'] = df['AU10_r'] * 0.5
-    df['AU14_r'] = df['AU15_r'] * 0.5
+    df['AU06_r'] = df['AU12_r'] * 0.8
+    df['AU25_r'] = df['AU12_r'] * 0.5
+    df['AU10_r'] = df['AU09_r'] * 0.8
+    df['AU14_r'] = df['AU15_r'] * 0.8
+
+    df['AU12_r'] = df['AU06_r'] * 2
+    df['AU15_r'] = df['AU14_r'] * 2
+    df['AU09_r'] = df['AU10_r'] * 2
 
     df.to_csv(output_csv_path, index=False)
 
-def process_and_save_to_csv(reprojected_sequence, intermed_csv_path, transformed_csv_path, ground_csv_path, final_csv_path, adjusted_csv_path, extended_csv_path, frame_rate=25):
+def process_and_save_to_csv(reprojected_sequence, intermed_csv_path, transformed_csv_path, ground_csv_path, final_csv_path, adjusted_csv_path, extended_csv_path, N,frame_rate=25):
     # Step 1: Append the reprojected sequence to the intermediate CSV
     append_sequence_to_csv(reprojected_sequence, intermed_csv_path, frame_rate)
 
@@ -162,11 +192,20 @@ def process_and_save_to_csv(reprojected_sequence, intermed_csv_path, transformed
 
     # Step 4: Coactivate AUs and save the final output
     coactivate_aus(final_csv_path, adjusted_csv_path)
-    # column_names = ['AU06_r', 'AU25_r', 'AU12_r', 'AU10_r', 'AU09_r', 'AU14_r', 'AU15_r']
-    # extend_non_zero_sequences(adjusted_csv_path, extended_csv_path, column_names, extend_by=25)
 
-import socket
-import threading
+    # Step 5: Perform interpolation on the newly added rows in adjusted_csv_path
+    df_adjusted = pd.read_csv(adjusted_csv_path)
+
+    # Specify the columns to interpolate (AU columns)
+    columns_to_interpolate = ['AU06_r', 'AU25_r', 'AU12_r', 'AU10_r', 'AU09_r', 'AU14_r', 'AU15_r']  # Add more columns if needed
+
+    # Perform interpolation
+    interpolated_df = interpolate_activations(df_adjusted, columns_to_interpolate, N)
+
+    # Save the interpolated results
+    interpolated_df.to_csv(extended_csv_path, index=False)
+
+
 
 class Sender:
     def __init__(self, forward_port, forward_address):
@@ -279,7 +318,6 @@ class Client:
         flat_frames = [item for frame in processed_frames for item in frame]
         with self.lock:
             self.latest_processed_batch = flat_frames
-        print(flat_frames)
         return flat_frames
 
     def process_frame(self, frame):
@@ -297,7 +335,7 @@ class Client:
         return [0]  # Default case, should not be reached
 
 class RealTimeProcessor:
-    def __init__(self, buffer_size=68, target_size=137):
+    def __init__(self, buffer_size=32, target_size=137):
         self.buffer_size = buffer_size
         self.target_size = target_size
         #self.buffer = buffer_sequence
@@ -305,7 +343,7 @@ class RealTimeProcessor:
         self.buffer = [0] * buffer_size
 
     def update_buffer(self, new_data):
-        if len(new_data) != 68:
+        if len(new_data) != 32:
             raise ValueError("New data must be exactly 16 frames long.")
         #self.buffer = self.buffer[len(new_data):] + new_data
         self.buffer = new_data
@@ -328,17 +366,15 @@ class RealTimeProcessor:
                     pos += 1
                 else:
                     break
-        print("projected client sequence ")
-        print(projected)
+        # print("projected client sequence ")
+        # print(projected)
         return projected
 
     def reproject_to_buffer(self, projected, buffer_size):
         target_length = len(projected)
         reprojected = [0] * buffer_size
-
         # Calculate the reprojection ratio
         ratio = round(target_length / buffer_size)
-
         # Initialize the position in the projected array
         pos = 0.0
 
@@ -409,7 +445,7 @@ def generate_random_tensors_numpy(batch_size=1):
     return z_tensor, chunk_descriptor_tensor
 
 
-def real_time_inference_loop(model, device, client, sender, processor, guide_weight=0.0):
+def real_time_inference_loop(model, device, client, sender, processor, miror, guide_weight=0.0):
     model.eval()
     batch_size = 1
     z_tensor, chunk_descriptor_tensor = generate_random_tensors_numpy(batch_size)
@@ -421,6 +457,7 @@ def real_time_inference_loop(model, device, client, sender, processor, guide_wei
     adjusted_csv_path = 'Ajusted_Final_csv_file.csv'
     ground_csv_path = 'GroundTruth.csv'
     extended_csv_path = 'FinalInterpolated.csv'
+    N = 10
 
     while True:
 
@@ -457,15 +494,27 @@ def real_time_inference_loop(model, device, client, sender, processor, guide_wei
             # best_prediction[best_prediction < 0] = 0
 
 
-            #reprojected_output = processor.reproject_to_buffer(best_prediction[0], 68)
+            #reprojected_output = processor.reproject_to_buffer(best_prediction[0], 32)
 
-            reprojected_output = generate_random_series_sequence(68, 4)
+            reprojected_output = generate_random_series_sequence(32, 4)
 
-            process_and_save_to_csv(reprojected_output, intermed_csv_path, transformed_csv_path, ground_csv_path, final_csv_path, adjusted_csv_path, extended_csv_path)
+            # Store the reprojected output sequence in the Storer
+            miror.store_sequence(reprojected_output)
+
+            if miror.should_mirror():
+                print("Mirroring Mode Activated: Using input tensor as output.")
+                reprojected_output = miror.mirror_sequence(input_tensor)
+
+            print("Client sequence:")
+            print(input_tensor)
+            print("Reprojected Output:")
+            print(reprojected_output)
+
+            process_and_save_to_csv(reprojected_output, intermed_csv_path, transformed_csv_path, ground_csv_path, final_csv_path, adjusted_csv_path, extended_csv_path, N)
 
             # Read the last 16 rows from the adjusted CSV file and queue them for the sender
-            df = pd.read_csv(adjusted_csv_path)
-            last_16_rows = df.tail(68).to_csv(index=False, header=False)
+            df = pd.read_csv(extended_csv_path)
+            last_16_rows = df.tail(32).to_csv(index=False, header=False)
             sender.queue_data(last_16_rows.splitlines())
 
             print("Client sequence:")
@@ -498,14 +547,15 @@ def main():
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.to(device)
 
-    processor = RealTimeProcessor(buffer_size=68, target_size=137)
+    processor = RealTimeProcessor(buffer_size=32, target_size=137)
+    mirror = Miror(consecutive_zero_threshold=4)
 
-    client = Client(50150, "localhost", 68)
+    client = Client(50150, "localhost", 32)
     client.connect_to_server()
     client.start_receiving()
     sender = Sender(50151, "localhost")
 
-    real_time_inference_loop(model, device, client, sender,  processor, guide_weight=guide_w)
+    real_time_inference_loop(model, device, client, sender,  processor, mirror, guide_weight=guide_w)
 
 
 if __name__ == "__main__":
