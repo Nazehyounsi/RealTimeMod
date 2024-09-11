@@ -36,7 +36,6 @@ class Miror:
         self.conversion_dict = {4: 1, 5: 2, 6: 3, 0: 0}  # Conversion mapping
 
     def store_sequence(self, sequence):
-        """Stores a reprojected sequence and checks for four consecutive zero sequences."""
         self.stored_sequences.append(sequence)
 
         # Keep only the last 4 sequences
@@ -50,13 +49,11 @@ class Miror:
             self.mirroring = False  # Deactivate mirroring mode
 
     def mirror_sequence(self, input_tensor):
-        """Converts the input tensor to the mirrored output format using the conversion dictionary."""
         input_values = input_tensor.cpu().numpy().squeeze()  # Convert tensor to numpy array
         mirrored_output = np.vectorize(self.conversion_dict.get)(input_values)  # Apply conversion
         return mirrored_output.tolist()
 
     def should_mirror(self):
-        """Returns True if we should apply mirroring, otherwise False."""
         return self.mirroring
 
 
@@ -205,6 +202,44 @@ def process_and_save_to_csv(reprojected_sequence, intermed_csv_path, transformed
     # Save the interpolated results
     interpolated_df.to_csv(extended_csv_path, index=False)
 
+
+class ExternalTensorClient:
+    def __init__(self, server_address, server_port):
+        self.server_address = server_address
+        self.server_port = server_port
+        self.socket = None
+
+    def connect(self):
+        """Establish a connection to the external server."""
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.socket.connect((self.server_address, self.server_port))
+        print(f"Connected to external server at {self.server_address}:{self.server_port}")
+
+    def receive_tensors(self):
+        """Receive z_tensor and chunk_descriptor_tensor from the external server."""
+        # Example: Assuming z_tensor and chunk_descriptor_tensor are each sent as 3 floats
+        z_tensor_data = self._receive_floats(3)
+        chunk_descriptor_data = self._receive_floats(3)
+
+        # Convert received data to PyTorch tensors
+        z_tensor = torch.tensor([z_tensor_data], dtype=torch.float32)
+        chunk_descriptor_tensor = torch.tensor([chunk_descriptor_data], dtype=torch.float32)
+
+        return z_tensor, chunk_descriptor_tensor
+
+    def _receive_floats(self, num_floats):
+        """Receive a specified number of floats from the external server."""
+        float_data = []
+        for _ in range(num_floats):
+            data = self.socket.recv(8)  # Each float is assumed to be 8 bytes (double precision)
+            float_value = struct.unpack('!d', data)[0]
+            float_data.append(float_value)
+        return float_data
+
+    def close(self):
+        """Close the connection to the external server."""
+        self.socket.close()
+        print("Connection to the server closed.")
 
 
 class Sender:
@@ -447,9 +482,12 @@ def generate_random_tensors_numpy(batch_size=1):
 
 def real_time_inference_loop(model, device, client, sender, processor, miror, guide_weight=0.0):
     model.eval()
+
+    # A commmenter for server reciving MI dialogs
     batch_size = 1
     z_tensor, chunk_descriptor_tensor = generate_random_tensors_numpy(batch_size)
     chunk_descriptor_tensor[:, 0] = 0.151
+
 
     intermed_csv_path = 'intermed.csv'
     transformed_csv_path = 'csv_file.csv'
@@ -476,6 +514,12 @@ def real_time_inference_loop(model, device, client, sender, processor, miror, gu
 
             updated_buffer = preprocess_real_time(input_vector, processor)
             input_tensor = torch.tensor(updated_buffer, dtype=torch.float32).unsqueeze(0).to(device)
+
+            # # Receive z_tensor and chunk_descriptor_tensor from the external server
+            # z_tensor, chunk_descriptor_tensor = tensor_client.receive_tensors()
+            # z_tensor = z_tensor.to(device)
+            # chunk_descriptor_tensor = chunk_descriptor_tensor.to(device)
+
             z_tensor = z_tensor.to(device)
             chunk_descriptor_tensor = chunk_descriptor_tensor.to(device)
 
@@ -553,6 +597,11 @@ def main():
     client = Client(50150, "localhost", 32)
     client.connect_to_server()
     client.start_receiving()
+
+    # # Initialize the external tensor client
+    # tensor_client = ExternalTensorClient(server_address="localhost", server_port=50160)
+    # tensor_client.connect()
+
     sender = Sender(50151, "localhost")
 
     real_time_inference_loop(model, device, client, sender,  processor, mirror, guide_weight=guide_w)
