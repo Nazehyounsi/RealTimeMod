@@ -203,44 +203,137 @@ def process_and_save_to_csv(reprojected_sequence, intermed_csv_path, transformed
     interpolated_df.to_csv(extended_csv_path, index=False)
 
 
+def generate_chunk_descriptor_tensor(storer, previous_input_tensor):
+    """
+    Generates the chunk_descriptor_tensor based on the previous reprojected output
+    and the previous input tensor stored in the Storer.
+
+    :param storer: A Storer object that stores the previous reprojected output.
+    :param previous_input_tensor: The previous input tensor.
+    :return: chunk_descriptor_tensor (PyTorch tensor)
+    """
+    value1, value2 = 0
+
+    # Extract the previous reprojected output and previous input tensor
+    previous_reprojected_output = storer.stored_sequences[
+        -1] if storer.stored_sequences else None  # Last stored sequence
+
+    # Check for previous reprojected output
+    if previous_reprojected_output is not None:
+        count_1s = previous_reprojected_output.count(1)
+        count_2s_and_3s = previous_reprojected_output.count(2) + previous_reprojected_output.count(3)
+
+        if all(value == 0 for value in previous_reprojected_output):
+            value1 = 0
+        elif count_2s_and_3s > count_1s:
+            value1 = -1
+        else:
+            value1 = 1
+
+    # Check for previous input tensor
+    input_values = previous_input_tensor.cpu().numpy().flatten().tolist()  # Convert to list for easy counting
+    count_1s = input_values.count(1)
+    count_2s_and_3s = input_values.count(2) + input_values.count(3)
+
+    if all(value == 0 for value in input_values):
+        value2 = 0
+    elif count_2s_and_3s > count_1s:
+        value2 = -1
+    else:
+        value2 = 1
+
+    return value1, value2
+
+def generate_z_tensor_from_string(string_value, conversion_table):
+    # Retrieve the corresponding values from the conversion table
+    value_one, value_two = conversion_table.get(string_value, (0.0, 0.0))  # Default to (0.0, 0.0) if string not found
+
+    # Third value is either 0 or the same as value_one (based on your explanation)
+    value_three = value_one  # You can set this to value_one if needed, e.g., value_three = value_one
+    #value_four = 0.0 si nécessaire
+
+    # Create the z_tensor
+    z_tensor = torch.tensor([[value_one, value_two, value_three]], dtype=torch.float32)
+
+    return z_tensor
+
 class ExternalTensorClient:
-    def __init__(self, server_address, server_port):
-        self.server_address = server_address
-        self.server_port = server_port
-        self.socket = None
+    def __init__(self, conversion_table, server1_address, server1_port, server2_address, server2_port):
+        self.server1_address = server1_address
+        self.server1_port = server1_port
+        self.server2_address = server2_address
+        self.server2_port = server2_port
+        self.conversion_table = conversion_table
+
+        self.z_tensor = None  # Initialize z_tensor as None before any updates
+        self.lock = threading.Lock()  # Use a lock to protect access to z_tensor
+        self.server1_socket = None
+        self.server2_socket = None
 
     def connect(self):
-        """Establish a connection to the external server."""
-        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.socket.connect((self.server_address, self.server_port))
-        print(f"Connected to external server at {self.server_address}:{self.server_port}")
+        """Establish connections to both servers."""
+        self.server1_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server1_socket.connect((self.server1_address, self.server1_port))
+        print(f"Connected to server1 at {self.server1_address}:{self.server1_port}")
 
-    def receive_tensors(self):
-        """Receive z_tensor and chunk_descriptor_tensor from the external server."""
-        # Example: Assuming z_tensor and chunk_descriptor_tensor are each sent as 3 floats
-        z_tensor_data = self._receive_floats(3)
-        chunk_descriptor_data = self._receive_floats(3)
+        self.server2_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server2_socket.connect((self.server2_address, self.server2_port))
+        print(f"Connected to server2 at {self.server2_address}:{self.server2_port}")
 
-        # Convert received data to PyTorch tensors
-        z_tensor = torch.tensor([z_tensor_data], dtype=torch.float32)
-        chunk_descriptor_tensor = torch.tensor([chunk_descriptor_data], dtype=torch.float32)
+    def start_receiving(self):
+        """Start two threads to receive data from both servers."""
+        threading.Thread(target=self.receive_from_server1, daemon=True).start()
+        threading.Thread(target=self.receive_from_server2, daemon=True).start()
 
-        return z_tensor, chunk_descriptor_tensor
+    def receive_from_server1(self):
+        """Receive strings from server1 and update z_tensor."""
+        while True:
+            try:
+                string_value = self._receive_string(self.server1_socket)
+                z_tensor = self.generate_z_tensor_from_string(string_value)
+                with self.lock:
+                    self.z_tensor = z_tensor  # Update z_tensor safely
+                print(f"Updated z_tensor from server1: {z_tensor}")
+            except Exception as e:
+                print(f"Error in server1: {e}")
+                break
 
-    def _receive_floats(self, num_floats):
-        """Receive a specified number of floats from the external server."""
-        float_data = []
-        for _ in range(num_floats):
-            data = self.socket.recv(8)  # Each float is assumed to be 8 bytes (double precision)
-            float_value = struct.unpack('!d', data)[0]
-            float_data.append(float_value)
-        return float_data
+    def receive_from_server2(self):
+        """Receive strings from server2 and update z_tensor."""
+        while True:
+            try:
+                string_value = self._receive_string(self.server2_socket)
+                z_tensor = self.generate_z_tensor_from_string(string_value)
+                with self.lock:
+                    self.z_tensor = z_tensor  # Update z_tensor safely
+                print(f"Updated z_tensor from server2: {z_tensor}")
+            except Exception as e:
+                print(f"Error in server2: {e}")
+                break
+
+    def _receive_string(self, sock):
+        """Receive one string from a given socket."""
+        data = sock.recv(8)  # Adjust byte size as per your protocol
+        string_value = data.decode('utf-8').strip()  # Decode and strip any padding or whitespace
+        return string_value
+
+    def generate_z_tensor_from_string(self, string_value):
+        """Convert the received string into a z_tensor using the conversion table."""
+        value_one, value_two = self.conversion_table.get(string_value, (0.0, 0.0))  # Default to (0.0, 0.0)
+        value_three = 0.0  # Third value as 0.0 (you can change this if needed)
+        z_tensor = torch.tensor([[value_one, value_two, value_three]], dtype=torch.float32)
+        return z_tensor
+
+    def get_z_tensor(self):
+        """Safely get the current z_tensor."""
+        with self.lock:
+            return self.z_tensor
 
     def close(self):
-        """Close the connection to the external server."""
-        self.socket.close()
-        print("Connection to the server closed.")
-
+        """Close the connections to both servers."""
+        self.server1_socket.close()
+        self.server2_socket.close()
+        print("Connections to both servers closed.")
 
 class Sender:
     def __init__(self, forward_port, forward_address):
@@ -480,13 +573,15 @@ def generate_random_tensors_numpy(batch_size=1):
     return z_tensor, chunk_descriptor_tensor
 
 
-def real_time_inference_loop(model, device, client, sender, processor, miror, guide_weight=0.0):
+def real_time_inference_loop(model, device, client, sender, processor, miror, tensor_client, guide_weight=0.0):
     model.eval()
 
     # A commmenter for server reciving MI dialogs
     batch_size = 1
+    previous_z_tensor, _ = generate_random_tensors_numpy(batch_size)
     z_tensor, chunk_descriptor_tensor = generate_random_tensors_numpy(batch_size)
-    chunk_descriptor_tensor[:, 0] = 0.151
+    previous_input_tensor = generate_random_series_sequence(32, 4)
+    chunk_descriptor_tensor[:, 0] = 0
 
 
     intermed_csv_path = 'intermed.csv'
@@ -498,7 +593,6 @@ def real_time_inference_loop(model, device, client, sender, processor, miror, gu
     N = 10
 
     while True:
-
         try:
             with client.lock:
                 input_vector = client.latest_processed_batch
@@ -508,39 +602,49 @@ def real_time_inference_loop(model, device, client, sender, processor, miror, gu
                 continue
 
             start_time = time.time()
-            chunk_descriptor_tensor[:, 0] += 0.001
-            chunk_descriptor_tensor[:, 1:] = 0
 
 
             updated_buffer = preprocess_real_time(input_vector, processor)
             input_tensor = torch.tensor(updated_buffer, dtype=torch.float32).unsqueeze(0).to(device)
 
-            # # Receive z_tensor and chunk_descriptor_tensor from the external server
-            # z_tensor, chunk_descriptor_tensor = tensor_client.receive_tensors()
-            # z_tensor = z_tensor.to(device)
-            # chunk_descriptor_tensor = chunk_descriptor_tensor.to(device)
+            # Get the latest z_tensor from the tensor client
+            z_tensor = tensor_client.get_z_tensor()
+
+            # If no new z_tensor is received, continue using the previous value
+            if z_tensor is None:
+                print("No new z_tensor received, using previous z_tensor.")
+                z_tensor = previous_z_tensor
+            else:
+                previous_z_tensor = z_tensor  # Update the previous_z_tensor with the latest received value
+
+            z_tensor = z_tensor.to(device)
+
+            #For the chunk descriptor it should be computed given the loop iteration number, and the previous projected outputs using the miroring storer
+            chunk_descriptor_tensor[:, 1], chunk_descriptor_tensor[:, 2] = generate_chunk_descriptor_tensor(miror, previous_input_tensor)
+            chunk_descriptor_tensor[:, 0] += 0.0001
+
 
             z_tensor = z_tensor.to(device)
             chunk_descriptor_tensor = chunk_descriptor_tensor.to(device)
 
-            # with torch.no_grad():
-            #     model.guide_w = guide_weight
-            #     start_time2 = time.time()
-            #     y_pred = model.sample(input_tensor, z_tensor, chunk_descriptor_tensor).detach().cpu().numpy()
-            #     end_time2 = time.time()
-            #     inference_time = end_time2 - start_time2
-            #     print(f"Inference time for the current batch: {inference_time: .4f} seconds")
+            with torch.no_grad():
+                model.guide_w = guide_weight
+                start_time2 = time.time()
+                y_pred = model.sample(input_tensor, z_tensor, chunk_descriptor_tensor).detach().cpu().numpy()
+                end_time2 = time.time()
+                inference_time = end_time2 - start_time2
+                print(f"Inference time for the current batch: {inference_time: .4f} seconds")
 
 
-            # best_prediction = np.round(y_pred)
-            # best_prediction[best_prediction == 4] = 3
-            # best_prediction[best_prediction >= 5] = 0
-            # best_prediction[best_prediction < 0] = 0
+            best_prediction = np.round(y_pred)
+            best_prediction[best_prediction == 4] = 3
+            best_prediction[best_prediction >= 5] = 0
+            best_prediction[best_prediction < 0] = 0
 
 
-            #reprojected_output = processor.reproject_to_buffer(best_prediction[0], 32)
+            reprojected_output = processor.reproject_to_buffer(best_prediction[0], 32)
 
-            reprojected_output = generate_random_series_sequence(32, 4)
+            #reprojected_output = generate_random_series_sequence(32, 4)
 
             # Store the reprojected output sequence in the Storer
             miror.store_sequence(reprojected_output)
@@ -566,6 +670,8 @@ def real_time_inference_loop(model, device, client, sender, processor, miror, gu
             print("Reprojected Output:")
             print(reprojected_output)
 
+            previous_input_tensor = input_tensor
+
             elapsed_time = time.time() - start_time
             time.sleep(max(0, 0.3 - elapsed_time))
         except Exception as e:
@@ -574,6 +680,28 @@ def real_time_inference_loop(model, device, client, sender, processor, miror, gu
 
 
 def main():
+    conversion_table = {
+        "Ask for consent": (1.0, 8.0),
+        "Medical Education and Guidance": (1.0, 8.0),
+        "Planning with the Patient": (1.0, 5.0),
+        "Give Solutions": (1.0, 5.0),
+        "Ask about current emotions": (1.0, 8.0),
+        "Reflections": (1.0, 7.0),
+        "Ask for information": (1.0, 8.0),
+        "Empathic reactions": (1.0, 7.0),
+        "Acknowledge Progress and Encourage": (1.0, 6.0),
+        "Backchannel": (3.0, 5.0),
+        "Greeting or Closing" : (1.0, 9.0),
+        "Experience Normalization and Reassurance": (1.0, 9.0),
+        "Changing unhealthy behavior": (2.0, 12.0),
+        "Sustaining unhealthy behavior": (2.0, 12.0),
+        "Sharing negative feeling or emotion": (2.0,10.0),
+        "Sharing positive feeling or emotion": (2.0, 10.0),
+        "Realization or Understanding": (2.0, 10.0),
+        "Sharing personal information": (2.0, 10.0),
+        "Asking for medical information": (2.0, 11.0)
+    }
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
@@ -599,12 +727,12 @@ def main():
     client.start_receiving()
 
     # # Initialize the external tensor client
-    # tensor_client = ExternalTensorClient(server_address="localhost", server_port=50160)
-    # tensor_client.connect()
+    tensor_client = ExternalTensorClient(conversion_table, "localhost", 50167, "localhost", 50168)
+    tensor_client.connect()
 
     sender = Sender(50151, "localhost")
 
-    real_time_inference_loop(model, device, client, sender,  processor, mirror, guide_weight=guide_w)
+    real_time_inference_loop(model, device, client, sender,  processor, mirror, tensor_client, guide_weight=guide_w)
 
 
 if __name__ == "__main__":
