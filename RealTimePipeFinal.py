@@ -258,7 +258,7 @@ def generate_z_tensor_from_string(string_value, conversion_table):
     return z_tensor
 
 class ExternalTensorClient:
-    def __init__(self, conversion_table, server1_address, server1_port, server2_address, server2_port):
+    def __init__(self, server1_address, server1_port, server2_address, server2_port, conversion_table):
         self.server1_address = server1_address
         self.server1_port = server1_port
         self.server2_address = server2_address
@@ -271,19 +271,35 @@ class ExternalTensorClient:
         self.server2_socket = None
 
     def connect(self):
-        """Establish connections to both servers."""
-        self.server1_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.server1_socket.connect((self.server1_address, self.server1_port))
-        print(f"Connected to server1 at {self.server1_address}:{self.server1_port}")
+        """Attempt to connect to both servers, retrying if they are not available."""
+        threading.Thread(target=self.connect_to_server1, daemon=True).start()
+        threading.Thread(target=self.connect_to_server2, daemon=True).start()
 
-        self.server2_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.server2_socket.connect((self.server2_address, self.server2_port))
-        print(f"Connected to server2 at {self.server2_address}:{self.server2_port}")
+    def connect_to_server1(self):
+        """Keep trying to connect to server1."""
+        while True:
+            try:
+                self.server1_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.server1_socket.connect((self.server1_address, self.server1_port))
+                print(f"Connected to server1 at {self.server1_address}:{self.server1_port}")
+                self.receive_from_server1()  # Start receiving data once connected
+                break
+            except ConnectionRefusedError:
+                print(f"Server1 not available, retrying in 2 seconds...")
+                time.sleep(2)  # Retry every 2 seconds
 
-    def start_receiving(self):
-        """Start two threads to receive data from both servers."""
-        threading.Thread(target=self.receive_from_server1, daemon=True).start()
-        threading.Thread(target=self.receive_from_server2, daemon=True).start()
+    def connect_to_server2(self):
+        """Keep trying to connect to server2."""
+        while True:
+            try:
+                self.server2_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.server2_socket.connect((self.server2_address, self.server2_port))
+                print(f"Connected to server2 at {self.server2_address}:{self.server2_port}")
+                self.receive_from_server2()  # Start receiving data once connected
+                break
+            except ConnectionRefusedError:
+                print(f"Server2 not available, retrying in 2 seconds...")
+                time.sleep(2)  # Retry every 2 seconds
 
     def receive_from_server1(self):
         """Receive strings from server1 and update z_tensor."""
@@ -296,6 +312,7 @@ class ExternalTensorClient:
                 print(f"Updated z_tensor from server1: {z_tensor}")
             except Exception as e:
                 print(f"Error in server1: {e}")
+                self.connect_to_server1()  # Reconnect if the connection drops
                 break
 
     def receive_from_server2(self):
@@ -309,6 +326,7 @@ class ExternalTensorClient:
                 print(f"Updated z_tensor from server2: {z_tensor}")
             except Exception as e:
                 print(f"Error in server2: {e}")
+                self.connect_to_server2()  # Reconnect if the connection drops
                 break
 
     def _receive_string(self, sock):
@@ -331,8 +349,10 @@ class ExternalTensorClient:
 
     def close(self):
         """Close the connections to both servers."""
-        self.server1_socket.close()
-        self.server2_socket.close()
+        if self.server1_socket:
+            self.server1_socket.close()
+        if self.server2_socket:
+            self.server2_socket.close()
         print("Connections to both servers closed.")
 
 class Sender:
