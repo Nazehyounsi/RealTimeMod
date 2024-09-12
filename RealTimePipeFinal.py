@@ -755,5 +755,41 @@ def main():
     real_time_inference_loop(model, device, client, sender,  processor, mirror, tensor_client, guide_weight=guide_w)
 
 
+def create_server(message_to_send, host='127.0.0.1', port=65432):
+    # Create a socket object
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+    # Bind the socket to an address and port
+    server_socket.bind((host, port))
+
+    # Enable the server to accept connections (listen)
+    server_socket.listen(1)
+    print(f"Server listening on {host}:{port}")
+
+    while True:
+        try:
+            # Wait for a connection
+            conn, addr = server_socket.accept()
+            print(f"Connected by {addr}")
+
+            with conn:
+                # Continuously send messages as long as the client is connected
+                while True:
+                    try:
+                        # Send the string message to the client
+                        conn.sendall(message_to_send.encode('utf-8'))
+                        print(f"Message sent to client: {message_to_send}")
+
+                        # You can add a sleep here to wait before sending another message, for example:
+                        time.sleep(5)  # Sends every 5 seconds, adjust as needed
+
+                    except BrokenPipeError:
+                        print("Client disconnected.")
+                        break  # Exit the inner loop if the client disconnects
+
+        except ConnectionError:
+            print("Connection failed. Retrying...")
+            time.sleep(2)  # Wait before trying to accept another connection
+
 if __name__ == "__main__":
     main()
