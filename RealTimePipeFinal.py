@@ -29,7 +29,7 @@ y_dim = 137
 
 
 class Miror:
-    def __init__(self, consecutive_zero_threshold=4):
+    def __init__(self, consecutive_zero_threshold=3):
         self.stored_sequences = []
         self.consecutive_zero_threshold = consecutive_zero_threshold
         self.mirroring = False
@@ -46,6 +46,7 @@ class Miror:
         if all(np.all(seq == 0) for seq in self.stored_sequences):
             self.mirroring = True  # Activate mirroring mode
         else:
+            print("3 PREVIOUS GENERATION ARE NOT EMPTY _ NO MIRRORING")
             self.mirroring = False  # Deactivate mirroring mode
 
     def mirror_sequence(self, input_tensor):
@@ -57,15 +58,14 @@ class Miror:
         return self.mirroring
 
 
-def identify_activation_indices(values, N):
+def identify_activation_indices(values):
     """
     Identify the indices of rising and falling edges in the sequence of values.
     This function returns two lists:
-    1. rising_indices: Indices where the value changes from 0 to a non-zero value.
-    2. falling_indices: Indices where the value changes from a non-zero value to 0.
+    1. rising_indices: Indices where the value changes from 0 to the activation value.
+    2. falling_indices: Indices where the value changes from the activation value to 0.
 
     :param values: The array of values (AU activation values).
-    :param N: The number of frames for interpolation (for reference).
     :return: A list of rising_indices and falling_indices.
     """
     rising_indices = []
@@ -74,47 +74,101 @@ def identify_activation_indices(values, N):
     length = len(values)
 
     for i in range(1, length):
-        # Rising edge: from 0 to non-zero
+        # Rising edge: from 0 to activation value
         if values[i] > 0 and values[i - 1] == 0:
             rising_indices.append(i)
 
-        # Falling edge: from non-zero to 0
+        # Falling edge: from activation value to 0
         if values[i] == 0 and values[i - 1] > 0:
             falling_indices.append(i)
 
+    # Handle activation starting at the first index
+    if values[0] > 0:
+        rising_indices = [0] + rising_indices
+
+    # Handle activation ending at the last index
+    if values[-1] > 0:
+        falling_indices.append(length)
+
     return rising_indices, falling_indices
 
-
-def interpolate_activations(df, columns, N):
+def interpolate_activations(df, columns, N, K):
     """
     Interpolates N frames before and after an activation for the specified columns.
-    Interpolates only over the registered indices to avoid overlapping interpolations.
+    If the number of frames between two successive interpolated segments is less than K,
+    then merge the two segments into one big segment (preserving the interpolation before the
+    start of the first segment and after the end of the second segment).
 
     :param df: DataFrame with activation data.
     :param columns: List of columns to perform interpolation on.
     :param N: Number of frames for interpolation.
+    :param K: Minimum gap between activations to consider them separate.
     :return: DataFrame with interpolated values.
     """
     for col in columns:
         values = df[col].values  # Extract the column's values as a numpy array
 
+        # Since activation values are always the same when active, find the activation value
+        activation_value = max(values)  # Assumes activation_value > 0
+        original_values = values.copy()  # Copy original values to preserve activation values
+
         # Step 1: Identify rising and falling edges
-        rising_indices, falling_indices = identify_activation_indices(values, N)
+        rising_indices, falling_indices = identify_activation_indices(values)
 
-        # Step 2: Perform interpolation only on registered indices
-        for idx in rising_indices:
-            start_idx = max(0, idx - N)
-            for j in range(start_idx, idx):
-                step = (values[idx] - values[start_idx]) / (idx - start_idx)
-                values[j] = round(values[start_idx] + (j - start_idx) * step, 3)
+        # Ensure rising_indices and falling_indices are of the same length
+        if len(rising_indices) > len(falling_indices):
+            # Activation continues beyond the end of the data
+            falling_indices.append(len(values))
+        elif len(falling_indices) > len(rising_indices):
+            # Activation started before the data began
+            rising_indices = [0] + rising_indices
 
-        for idx in falling_indices:
-            end_idx = min(len(values), idx + N)
-            for j in range(idx, end_idx):
-                step = values[idx - 1] / (end_idx - idx)
-                values[j] = round(values[idx - 1] - (j - idx) * step, 3)
+        # Step 2: Create list of segments
+        segments = list(zip(rising_indices, falling_indices))
 
-        df[col] = values  # Update the DataFrame column with the interpolated values
+        # Step 3: Merge segments with gaps less than K
+        merged_segments = []
+        if segments:
+            current_segment = segments[0]
+            for next_segment in segments[1:]:
+                gap = next_segment[0] - current_segment[1]
+                if gap < K:
+                    # Merge segments
+                    current_segment = (current_segment[0], next_segment[1])
+                else:
+                    merged_segments.append(current_segment)
+                    current_segment = next_segment
+            merged_segments.append(current_segment)
+        else:
+            merged_segments = segments  # Empty list if no segments found
+
+        # Step 4: Reset the values to zero before interpolation
+        values[:] = 0
+
+        # Step 5: Perform interpolation on merged segments
+        for segment in merged_segments:
+            start_idx = max(0, segment[0] - N)
+            end_idx = min(len(values), segment[1] + N)
+
+            # Set activation values within the segment
+            values[segment[0]:segment[1]] = activation_value
+
+            # Interpolate N frames before activation (rising edge)
+            if segment[0] > 0 and start_idx < segment[0]:
+                interp_length = segment[0] - start_idx
+                for idx, j in enumerate(range(start_idx, segment[0])):
+                    # Linearly interpolate from 0 to activation_value
+                    values[j] = round((activation_value / interp_length) * (idx + 1), 3)
+
+            # Interpolate N frames after activation (falling edge)
+            if segment[1] < len(values) and segment[1] < end_idx:
+                interp_length = end_idx - segment[1]
+                for idx, j in enumerate(range(segment[1], end_idx)):
+                    # Linearly interpolate from activation_value down to 0
+                    values[j] = round(activation_value - (activation_value / interp_length) * (idx + 1), 3)
+
+        # Update the DataFrame column with the interpolated values
+        df[col] = values
 
     return df
 
@@ -162,18 +216,22 @@ def restructure_to_baseline(transformed_csv_path, baseline_csv_path, output_csv_
 def coactivate_aus(input_csv_path, output_csv_path):
     df = pd.read_csv(input_csv_path)
 
-    df['AU06_r'] = df['AU12_r'] * 0.8
-    df['AU25_r'] = df['AU12_r'] * 0.5
-    df['AU10_r'] = df['AU09_r'] * 0.8
-    df['AU14_r'] = df['AU15_r'] * 0.8
+    # Copy values from 'AU12_r' to 'AU06_r' and 'AU25_r'
+    df['AU12_r'] = df['AU12_r'] * 3
+    df['AU06_r'] = df['AU12_r'] * 0.5
+    df['AU25_r'] = df['AU12_r'] * 0.25
 
-    df['AU12_r'] = df['AU06_r'] * 2
-    df['AU15_r'] = df['AU14_r'] * 2
-    df['AU09_r'] = df['AU10_r'] * 2
+    # Copy values from 'AU09_r' to 'AU10_r'
+    df['AU10_r'] = df['AU10_r'] * 5
+    df['AU09_r'] = df['AU10_r'] * 0.5
+
+    # Copy values from 'AU15_r' to 'AU14_r'
+    df['AU15_r'] = df['AU15_r'] * 2
+    df['AU14_r'] = df['AU15_r'] * 0.5
 
     df.to_csv(output_csv_path, index=False)
 
-def process_and_save_to_csv(reprojected_sequence, intermed_csv_path, transformed_csv_path, ground_csv_path, final_csv_path, adjusted_csv_path, extended_csv_path, N,frame_rate=25):
+def process_and_save_to_csv(reprojected_sequence, intermed_csv_path, transformed_csv_path, ground_csv_path, final_csv_path, adjusted_csv_path, extended_csv_path, N, K, frame_rate=25):
     # Step 1: Append the reprojected sequence to the intermediate CSV
     append_sequence_to_csv(reprojected_sequence, intermed_csv_path, frame_rate)
 
@@ -197,13 +255,13 @@ def process_and_save_to_csv(reprojected_sequence, intermed_csv_path, transformed
     columns_to_interpolate = ['AU06_r', 'AU25_r', 'AU12_r', 'AU10_r', 'AU09_r', 'AU14_r', 'AU15_r']  # Add more columns if needed
 
     # Perform interpolation
-    interpolated_df = interpolate_activations(df_adjusted, columns_to_interpolate, N)
+    interpolated_df = interpolate_activations(df_adjusted, columns_to_interpolate, N, K)
 
     # Save the interpolated results
     interpolated_df.to_csv(extended_csv_path, index=False)
 
 
-def generate_chunk_descriptor_tensor(storer, previous_input_tensor):
+def generate_chunk_descriptor_tensor(storer, previous_input_tensor, C_value):
     """
     Generates the chunk_descriptor_tensor based on the previous reprojected output
     and the previous input tensor stored in the Storer.
@@ -212,11 +270,11 @@ def generate_chunk_descriptor_tensor(storer, previous_input_tensor):
     :param previous_input_tensor: The previous input tensor.
     :return: chunk_descriptor_tensor (PyTorch tensor)
     """
-    value1, value2 = 0
+    value1 = 0
+    value2 = 0
 
     # Extract the previous reprojected output and previous input tensor
-    previous_reprojected_output = storer.stored_sequences[
-        -1] if storer.stored_sequences else None  # Last stored sequence
+    previous_reprojected_output = storer.stored_sequences[-1] if storer.stored_sequences else None  # Last stored sequence
 
     # Check for previous reprojected output
     if previous_reprojected_output is not None:
@@ -229,20 +287,25 @@ def generate_chunk_descriptor_tensor(storer, previous_input_tensor):
             value1 = -1
         else:
             value1 = 1
-
     # Check for previous input tensor
-    input_values = previous_input_tensor.cpu().numpy().flatten().tolist()  # Convert to list for easy counting
-    count_1s = input_values.count(1)
-    count_2s_and_3s = input_values.count(2) + input_values.count(3)
+    if previous_input_tensor != None :
+        input_values = previous_input_tensor.numpy().flatten().tolist()  # Convert to list for easy counting
+        count_1s = input_values.count(1)
+        count_2s_and_3s = input_values.count(2) + input_values.count(3)
 
-    if all(value == 0 for value in input_values):
+        if all(value == 0 for value in input_values):
+            value2 = 0
+        elif count_2s_and_3s > count_1s:
+            value2 = -1
+        else:
+            value2 = 1
+    else :
         value2 = 0
-    elif count_2s_and_3s > count_1s:
-        value2 = -1
-    else:
-        value2 = 1
 
-    return value1, value2
+    # Construct the chunk descriptor tensor
+    chunk_descriptor_tensor = torch.tensor([[value1, value2, C_value]], dtype=torch.float32)
+
+    return chunk_descriptor_tensor
 
 def generate_z_tensor_from_string(string_value, conversion_table):
     # Retrieve the corresponding values from the conversion table
@@ -258,7 +321,7 @@ def generate_z_tensor_from_string(string_value, conversion_table):
     return z_tensor
 
 class ExternalTensorClient:
-    def __init__(self, server1_address, server1_port, server2_address, server2_port, conversion_table):
+    def __init__(self,  conversion_table, server1_address, server1_port, server2_address, server2_port):
         self.server1_address = server1_address
         self.server1_port = server1_port
         self.server2_address = server2_address
@@ -483,7 +546,7 @@ class Client:
         return [0]  # Default case, should not be reached
 
 class RealTimeProcessor:
-    def __init__(self, buffer_size=32, target_size=137):
+    def __init__(self, buffer_size=64, target_size=137):
         self.buffer_size = buffer_size
         self.target_size = target_size
         #self.buffer = buffer_sequence
@@ -491,7 +554,7 @@ class RealTimeProcessor:
         self.buffer = [0] * buffer_size
 
     def update_buffer(self, new_data):
-        if len(new_data) != 32:
+        if len(new_data) != 64:
             raise ValueError("New data must be exactly 16 frames long.")
         #self.buffer = self.buffer[len(new_data):] + new_data
         self.buffer = new_data
@@ -600,8 +663,8 @@ def real_time_inference_loop(model, device, client, sender, processor, miror, te
     batch_size = 1
     previous_z_tensor, _ = generate_random_tensors_numpy(batch_size)
     z_tensor, chunk_descriptor_tensor = generate_random_tensors_numpy(batch_size)
-    previous_input_tensor = generate_random_series_sequence(32, 4)
-    chunk_descriptor_tensor[:, 0] = 0
+    previous_input_tensor = None
+    C_value = 0.0
 
 
     intermed_csv_path = 'intermed.csv'
@@ -610,7 +673,8 @@ def real_time_inference_loop(model, device, client, sender, processor, miror, te
     adjusted_csv_path = 'Ajusted_Final_csv_file.csv'
     ground_csv_path = 'GroundTruth.csv'
     extended_csv_path = 'FinalInterpolated.csv'
-    N = 10
+    N = 8
+    K = 20
 
     while True:
         try:
@@ -627,7 +691,7 @@ def real_time_inference_loop(model, device, client, sender, processor, miror, te
             updated_buffer = preprocess_real_time(input_vector, processor)
             input_tensor = torch.tensor(updated_buffer, dtype=torch.float32).unsqueeze(0).to(device)
 
-            # Get the latest z_tensor from the tensor client
+            # # Get the latest z_tensor from the tensor client
             z_tensor = tensor_client.get_z_tensor()
 
             # If no new z_tensor is received, continue using the previous value
@@ -640,31 +704,29 @@ def real_time_inference_loop(model, device, client, sender, processor, miror, te
             z_tensor = z_tensor.to(device)
 
             #For the chunk descriptor it should be computed given the loop iteration number, and the previous projected outputs using the miroring storer
-            chunk_descriptor_tensor[:, 1], chunk_descriptor_tensor[:, 2] = generate_chunk_descriptor_tensor(miror, previous_input_tensor)
-            chunk_descriptor_tensor[:, 0] += 0.0001
+            chunk_descriptor_tensor = generate_chunk_descriptor_tensor(miror, previous_input_tensor, C_value)
+            C_value += 0.0001
 
-
-            z_tensor = z_tensor.to(device)
             chunk_descriptor_tensor = chunk_descriptor_tensor.to(device)
 
-            with torch.no_grad():
-                model.guide_w = guide_weight
-                start_time2 = time.time()
-                y_pred = model.sample(input_tensor, z_tensor, chunk_descriptor_tensor).detach().cpu().numpy()
-                end_time2 = time.time()
-                inference_time = end_time2 - start_time2
-                print(f"Inference time for the current batch: {inference_time: .4f} seconds")
+            # with torch.no_grad():
+            #     model.guide_w = guide_weight
+            #     start_time2 = time.time()
+            #     y_pred = model.sample(input_tensor, z_tensor, chunk_descriptor_tensor).detach().cpu().numpy()
+            #     end_time2 = time.time()
+            #     inference_time = end_time2 - start_time2
+            #     print(f"Inference time for the current batch: {inference_time: .4f} seconds")
+            #
+            #
+            # best_prediction = np.round(y_pred)
+            # best_prediction[best_prediction == 4] = 3
+            # best_prediction[best_prediction >= 5] = 0
+            # best_prediction[best_prediction < 0] = 0
+            #
+            #
+            # reprojected_output = processor.reproject_to_buffer(best_prediction[0], 64)
 
-
-            best_prediction = np.round(y_pred)
-            best_prediction[best_prediction == 4] = 3
-            best_prediction[best_prediction >= 5] = 0
-            best_prediction[best_prediction < 0] = 0
-
-
-            reprojected_output = processor.reproject_to_buffer(best_prediction[0], 32)
-
-            #reprojected_output = generate_random_series_sequence(32, 4)
+            reprojected_output = generate_random_series_sequence(64, 4)
 
             # Store the reprojected output sequence in the Storer
             miror.store_sequence(reprojected_output)
@@ -673,16 +735,17 @@ def real_time_inference_loop(model, device, client, sender, processor, miror, te
                 print("Mirroring Mode Activated: Using input tensor as output.")
                 reprojected_output = miror.mirror_sequence(input_tensor)
 
+
             print("Client sequence:")
             print(input_tensor)
             print("Reprojected Output:")
             print(reprojected_output)
 
-            process_and_save_to_csv(reprojected_output, intermed_csv_path, transformed_csv_path, ground_csv_path, final_csv_path, adjusted_csv_path, extended_csv_path, N)
+            process_and_save_to_csv(reprojected_output, intermed_csv_path, transformed_csv_path, ground_csv_path, final_csv_path, adjusted_csv_path, extended_csv_path, N, K)
 
             # Read the last 16 rows from the adjusted CSV file and queue them for the sender
             df = pd.read_csv(extended_csv_path)
-            last_16_rows = df.tail(32).to_csv(index=False, header=False)
+            last_16_rows = df.tail(64).to_csv(index=False, header=False)
             sender.queue_data(last_16_rows.splitlines())
 
             print("Client sequence:")
@@ -739,57 +802,21 @@ def main():
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.to(device)
 
-    processor = RealTimeProcessor(buffer_size=32, target_size=137)
-    mirror = Miror(consecutive_zero_threshold=4)
+    processor = RealTimeProcessor(buffer_size=64, target_size=137)
+    mirror = Miror(consecutive_zero_threshold=3)
 
-    client = Client(50150, "localhost", 32)
+    client = Client(50150, "localhost", 64)
     client.connect_to_server()
     client.start_receiving()
 
     # # Initialize the external tensor client
-    tensor_client = ExternalTensorClient(conversion_table, "localhost", 50167, "localhost", 50168)
+    tensor_client = ExternalTensorClient(conversion_table, server1_address="localhost", server1_port= 50167, server2_address="localhost", server2_port=50168)
     tensor_client.connect()
 
     sender = Sender(50151, "localhost")
 
     real_time_inference_loop(model, device, client, sender,  processor, mirror, tensor_client, guide_weight=guide_w)
 
-
-def create_server(message_to_send, host='127.0.0.1', port=65432):
-    # Create a socket object
-    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-
-    # Bind the socket to an address and port
-    server_socket.bind((host, port))
-
-    # Enable the server to accept connections (listen)
-    server_socket.listen(1)
-    print(f"Server listening on {host}:{port}")
-
-    while True:
-        try:
-            # Wait for a connection
-            conn, addr = server_socket.accept()
-            print(f"Connected by {addr}")
-
-            with conn:
-                # Continuously send messages as long as the client is connected
-                while True:
-                    try:
-                        # Send the string message to the client
-                        conn.sendall(message_to_send.encode('utf-8'))
-                        print(f"Message sent to client: {message_to_send}")
-
-                        # You can add a sleep here to wait before sending another message, for example:
-                        time.sleep(5)  # Sends every 5 seconds, adjust as needed
-
-                    except BrokenPipeError:
-                        print("Client disconnected.")
-                        break  # Exit the inner loop if the client disconnects
-
-        except ConnectionError:
-            print("Connection failed. Retrying...")
-            time.sleep(2)  # Wait before trying to accept another connection
 
 if __name__ == "__main__":
     main()
