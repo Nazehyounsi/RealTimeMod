@@ -200,3 +200,88 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def interpolate_activations_betweenchunks(df_prev, df_curr, columns, N, K):
+    """
+    Interpolates activations between two successive chunks.
+
+    :param df_prev: DataFrame of the previous chunk.
+    :param df_curr: DataFrame of the current chunk.
+    :param columns: List of columns to process.
+    :param N: Number of frames for interpolation.
+    :param K: Maximum gap to consider merging activations.
+    :return: Modified df_prev and df_curr DataFrames.
+    """
+    for col in columns:
+        # Get the values for the column in both chunks
+        values_prev = df_prev[col].values.copy()
+        values_curr = df_curr[col].values.copy()
+
+        # Find the last non-zero index in the previous chunk
+        non_zero_indices_prev = np.nonzero(values_prev)[0]
+        if len(non_zero_indices_prev) > 0:
+            last_non_zero_prev = non_zero_indices_prev[-1]
+            activation_value_prev = values_prev[last_non_zero_prev]
+        else:
+            last_non_zero_prev = None
+            activation_value_prev = 0
+
+        # Find the first non-zero index in the current chunk
+        non_zero_indices_curr = np.nonzero(values_curr)[0]
+        if len(non_zero_indices_curr) > 0:
+            first_non_zero_curr = non_zero_indices_curr[0]
+            activation_value_curr = values_curr[first_non_zero_curr]
+        else:
+            first_non_zero_curr = None
+            activation_value_curr = 0
+
+        # Calculate the gap between the two activations
+        if last_non_zero_prev is not None and first_non_zero_curr is not None:
+            gap = first_non_zero_curr + (len(values_prev) - last_non_zero_prev - 1)
+            if gap < K:
+                # Merge the activations by filling the gap
+                # Adjust previous chunk if needed
+                # No need to adjust previous chunk in this case
+                # Adjust current chunk
+                values_curr[:first_non_zero_curr] = activation_value_curr
+        elif last_non_zero_prev is not None and first_non_zero_curr is None:
+            # Previous chunk ends with activation, current chunk is zeros
+            # Interpolate decrease over N frames in current chunk
+            end_idx = min(N, len(values_curr))
+            for i in range(end_idx):
+                values_curr[i] = activation_value_prev * (1 - (i + 1) / N)
+        elif last_non_zero_prev is None and first_non_zero_curr is not None:
+            # Previous chunk ends with zeros, current chunk starts with activation
+            # Interpolate increase over N frames at the end of previous chunk
+            start_idx = max(0, len(values_prev) - N)
+            for i in range(start_idx, len(values_prev)):
+                values_prev[i] = activation_value_curr * ((i - start_idx + 1) / N)
+
+        # Update the DataFrames
+        df_prev[col] = values_prev
+        df_curr[col] = values_curr
+
+    return df_prev, df_curr
+
+df = pd.read_csv(extended_csv_path)
+columns_to_interpolate = ['AU06_r', 'AU25_r', 'AU12_r', 'AU10_r', 'AU09_r', 'AU14_r', 'AU15_r']
+
+# Ensure enough data is available
+if df.shape[0] > 127:
+    # Get the previous and current chunks
+    df_prev = df.iloc[-256:-128].reset_index(drop=True)
+    df_curr = df.iloc[-128:].reset_index(drop=True)
+
+    # Apply the interpolation between chunks
+    df_prev, df_curr = interpolate_activations_betweenchunks(
+        df_prev, df_curr, columns_to_interpolate, N, K
+    )
+
+    # Update the main DataFrame with modified chunks
+    df.update(df_prev)
+    df.update(df_curr)
+
+# Get the last 64 rows to send
+last_buffer_rows = df.tail(64).to_csv(index=False, header=False)
+sender.queue_data(last_buffer_rows.splitlines())
